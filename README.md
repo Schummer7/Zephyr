@@ -1,35 +1,40 @@
-# Real-Time Avionics Telemetry & Safety Monitor (Zephyr RTOS)
+# Flight Software Telemetry & FSM System (Zephyr RTOS)
 
-A robust, multithreaded embedded telemetry monitoring application developed with **Zephyr RTOS** targeting the `native_sim` architecture. Built applying safety-critical software principles aligned with **DO-178C** guidelines (static resource allocation, deterministic IPC, and runtime integrity verification).
+Embedded flight software prototype developed on **Zephyr RTOS**, designed under strict real-time, deterministic, and fault-tolerant architecture patterns commonly found in aerospace avionics (inspired by ECSS / DO-178C guidelines).
 
----
-
-## Key Architecture & Features
-
-- **Zero-Allocation Policy (No `malloc`)**: All kernel primitives (threads, semaphores, queues) are statically defined at compile time using `K_THREAD_DEFINE`, `K_SEM_DEFINE`, and `K_MSGQ_DEFINE`, eliminating runtime heap fragmentation.
-- **Producer-Consumer Design**: Sensor sampling and telemetry display are decoupled via a thread-safe Zephyr message queue (`k_msgq`), avoiding race conditions.
-- **Preemptive Emergency Task (`rti`)**: A high-priority thread (Priority 0) blocked on a binary semaphore (`k_sem`). It preempts normal telemetry execution instantly if sensor parameters exceed critical safety margins.
-- **8-Bit Checksum Integrity Check**: Implements byte-level memory inspection with pointer casting (`uint8_t *`) to seal and verify packets before consumption, preventing the processing of corrupted frames.
-- **Defensive Error Handling**: Explicit validation of kernel API returns and discard policies for corrupted frames.
+The application implements a decoupled producer-consumer pipeline with frame integrity checks, out-of-envelope telemetry monitoring via high-priority preemption, and a lock-free Finite State Machine (FSM).
 
 ---
 
-## Flight Envelope Thresholds
+## 🛠️ System Architecture
 
-| Parameter | Operational Range | Critical Trigger Threshold |
-| :--- | :--- | :--- |
-| **Altitude** | 10,000 – 12,000 ft | > 11,820 ft |
-| **Temperature** | -35 °C to -15 °C | Nominal monitoring |
-| **Radiation** | 0.00 – 5.00 uSv/h | > 3.00 uSv/h |
+### 1. Lock-Free Finite State Machine (FSM)
+Global operating modes are managed using Zephyr kernel atomic primitives (`atomic_t`, `atomic_get`, `atomic_set`). This design eliminates the need for mutual exclusion primitives (`k_mutex`) during critical transitions, entirely preventing **priority inversion** and blocking overhead within the Priority 0 emergency task.
+
+* **`MODO_BOOT`:** Initial boot sequence and Power-On Self Test (POST).
+* **`MODO_NORMAL`:** Periodic sensor sampling and nominal telemetry processing.
+* **`MODO_EMERGENCIA` (Safe Hold Mode):** Contingency state triggered on critical anomalies, throttling sensor acquisition to conserve system resources.
+
+### 2. Thread Topology & Concurrency
+
+| Thread / Task | Priority | Role & Description |
+| :--- | :---: | :--- |
+| **`aux` (`rti`)** | **0** (Preemptive) | Fast reactive task. Blocks indefinitely on a binary semaphore until the producer flags an out-of-bounds parameter (altitude > 11820 ft or radiation > 3 µSv/h), immediately executing an atomic transition to `MODO_EMERGENCIA`. |
+| **`rtos` (`llamar_hilo`)** | **3** | Flight parameter acquisition task. Dynamically adapts its polling rate according to the system state (1 s in Nominal, 3 s in Emergency). Computes payload checksum and queues data into `k_msgq`. |
+| **`main`** | **0** (Sys) | Telemetry consumer. Performs system initialization/state promotion, extracts frames from `k_msgq`, verifies data integrity, and logs system telemetry along with current operational mode. |
+
+### 3. Data Integrity & Verification
+Each telemetry payload (`struct telemetria`) embeds a byte-wise modular checksum. The consumer recalculates the verification byte upon dequeuing and discards corrupted packets prior to telemetry handling.
 
 ---
 
-## File Structure
+## 📋 Telemetry Frame Layout
 
-```text
-.
-├── CMakeLists.txt        # CMake build configuration for Zephyr
-├── prj.conf              # Kernel Kconfig options (random, floating point print)
-├── README.md             # Project documentation
-└── src/
-    └── main.c           # Core application logic & thread implementations
+```c
+struct telemetria {
+    int16_t altura;
+    int16_t temperatura;
+    float radiacion;
+    int16_t numero_comprobaciones;
+    uint8_t Check_sum;
+};
